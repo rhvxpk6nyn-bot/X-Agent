@@ -1,0 +1,40 @@
+{
+  "productName": "Agent",
+  "version": "0.1.0",
+  "identifier": "com.agent.desktop",
+  "build": {
+    "frontendDist": "../../web/frontend/dist",
+    "devUrl": "http://localhost:5173",
+    "beforeDevCommand": "cd ../../web/frontend && npm run dev",
+    "beforeBuildCommand": "cd ../../web/frontend && npm run build"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "title": "Agent",
+        "width": 1100,
+        "height": 720,
+        "minWidth": 680,
+        "minHeight": 400,
+        "center": true,
+        "decorations": true,
+        "transparent": false,
+        "visible": true
+      }
+    ],
+    "trayIcon": {
+      "iconPath": "icons/icon.png",
+      "iconAsTemplate": true,
+      "tooltip": "Agent"
+    },
+    "security": {
+      "csp": null
+    }
+  },
+  "plugins": {
+    "shell": {
+      "open": true
+    }
+  }
+}

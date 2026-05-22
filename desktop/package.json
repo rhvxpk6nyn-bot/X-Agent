@@ -1,0 +1,12 @@
+{
+  "name": "agent-desktop",
+  "private": true,
+  "scripts": {
+    "dev": "npx tauri dev",
+    "build": "npx tauri build",
+    "icon": "npx tauri icon"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  }
+}

@@ -1,0 +1,91 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * { box-sizing: border-box; }
+  html, body, #root { height: 100%; margin: 0; padding: 0; }
+  body {
+    background: #0A0A0B;
+    color: #EDEDEF;
+    font-family: 'SF Pro Display', 'Inter', system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  ::-webkit-scrollbar { width: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: #2E2E34; border-radius: 3px; }
+  ::-webkit-scrollbar-thumb:hover { background: #5C5C60; }
+}
+
+@layer components {
+  .glass {
+    background: rgba(20, 20, 22, 0.8);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    border: 1px solid rgba(30, 30, 34, 0.6);
+  }
+  .card {
+    background: #141416;
+    border: 1px solid #1E1E22;
+    border-radius: 12px;
+    padding: 16px;
+    transition: all 150ms ease;
+  }
+  .card:hover { border-color: #2E2E34; }
+  .input-field {
+    background: #1C1C1F;
+    border: 1px solid #2E2E34;
+    border-radius: 12px;
+    padding: 12px 16px;
+    color: #EDEDEF;
+    font-size: 14px;
+    outline: none;
+    transition: border-color 200ms ease;
+  }
+  .input-field:focus { border-color: #6C5CE7; }
+  .btn-primary {
+    background: #6C5CE7;
+    color: white;
+    border: none;
+    border-radius: 12px;
+    padding: 8px 20px;
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 150ms ease;
+  }
+  .btn-primary:hover { background: #7B6BEF; transform: scale(1.02); }
+  .btn-ghost {
+    background: transparent;
+    color: #8B8B90;
+    border: 1px solid #2E2E34;
+    border-radius: 8px;
+    padding: 6px 12px;
+    font-size: 13px;
+    cursor: pointer;
+    transition: all 150ms ease;
+  }
+  .btn-ghost:hover { background: #1C1C1F; color: #EDEDEF; }
+}
+
+/* Message animations */
+@keyframes msgIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.msg-enter { animation: msgIn 300ms ease-out; }
+
+/* Tool pulse */
+@keyframes toolPulse {
+  0%, 100% { background: #1C1C1F; }
+  50% { background: #252528; }
+}
+.tool-exec { animation: toolPulse 1.5s ease infinite; }
+
+/* Status dot */
+@keyframes dotPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+.dot-active { animation: dotPulse 1.2s ease infinite; }
