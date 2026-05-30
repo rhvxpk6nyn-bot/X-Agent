@@ -2,6 +2,7 @@
 
 import json
 import sqlite3
+import threading
 import time
 from pathlib import Path
 
@@ -16,14 +17,16 @@ COLD_DIR = MEMORY_DIR / "cold"
 FTS_DB_PATH = AGENT_HOME / "fts.db"
 
 
-_fts_db: sqlite3.Connection | None = None
+_fts_local = threading.local()
+_fts_write_lock = threading.Lock()
 
 def _get_fts() -> sqlite3.Connection:
-    global _fts_db
-    if _fts_db is None:
-        _fts_db = sqlite3.connect(str(FTS_DB_PATH))
-        _fts_db.execute("CREATE VIRTUAL TABLE IF NOT EXISTS mem_fts USING fts5(id, title, content, tags, tokenize='unicode61')")
-    return _fts_db
+    db = getattr(_fts_local, "db", None)
+    if db is None:
+        db = sqlite3.connect(str(FTS_DB_PATH))
+        db.execute("CREATE VIRTUAL TABLE IF NOT EXISTS mem_fts USING fts5(id, title, content, tags, tokenize='unicode61')")
+        _fts_local.db = db
+    return db
 
 
 class Memory:
@@ -74,13 +77,14 @@ class MemoryStore:
         dest = {"hot": HOT_DIR, "warm": WARM_DIR, "cold": COLD_DIR}[tier]
         path = dest / f"{mem.id}.md"
         path.write_text(f"---\n{yaml.dump({'id':mem.id,'type':mem.type,'title':mem.title,'tags':mem.tags,'importance':mem.importance,'created_at':mem.created_at})}---\n\n{mem.content}")
-        db = _get_fts()
-        # FTS5 has no UNIQUE constraint, so INSERT OR REPLACE would duplicate.
-        # Delete any existing row for this id first to keep it idempotent.
-        db.execute("DELETE FROM mem_fts WHERE id = ?", (mem.id,))
-        db.execute("INSERT INTO mem_fts(id, title, content, tags) VALUES(?,?,?,?)",
-                   (mem.id, mem.title, mem.content, " ".join(mem.tags)))
-        db.commit()
+        with _fts_write_lock:
+            db = _get_fts()
+            # FTS5 has no UNIQUE constraint, so INSERT OR REPLACE would duplicate.
+            # Delete any existing row for this id first to keep it idempotent.
+            db.execute("DELETE FROM mem_fts WHERE id = ?", (mem.id,))
+            db.execute("INSERT INTO mem_fts(id, title, content, tags) VALUES(?,?,?,?)",
+                       (mem.id, mem.title, mem.content, " ".join(mem.tags)))
+            db.commit()
 
     def get_hot(self) -> list[Memory]:
         return sorted([Memory.from_file(p) for p in HOT_DIR.glob("*.md")],
