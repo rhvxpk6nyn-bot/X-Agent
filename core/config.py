@@ -14,7 +14,7 @@ class ModelConfig(BaseModel):
     model: str = ""
     api_key: str = ""
     base_url: str = ""
-    max_tokens: int = 4096
+    max_tokens: int = 8192
     temperature: float = 0.7
 
 
@@ -23,12 +23,26 @@ DEFAULT_MODELS = {
         provider="deepseek", model="deepseek-chat",
         api_key=os.environ.get("DEEPSEEK_API_KEY", ""),
         base_url="https://api.deepseek.com/v1",
+        max_tokens=16384,
+    ),
+    "deepseek-v4-pro": ModelConfig(
+        provider="deepseek", model="deepseek-v4-pro",
+        api_key=os.environ.get("DEEPSEEK_API_KEY", ""),
+        base_url="https://api.deepseek.com/v1",
+        max_tokens=16384,
+    ),
+    "deepseek-reasoner": ModelConfig(
+        provider="deepseek", model="deepseek-reasoner",
+        api_key=os.environ.get("DEEPSEEK_API_KEY", ""),
+        base_url="https://api.deepseek.com/v1",
+        max_tokens=32768,
+        temperature=0.0,
     ),
     "qwen-vl": ModelConfig(
         provider="dashscope", model="qwen-vl-max",
         api_key=os.environ.get("DASHSCOPE_API_KEY", ""),
         base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
-        max_tokens=2048,
+        max_tokens=4096,
     ),
     "ollama": ModelConfig(
         provider="ollama", model="llama3.2",
@@ -36,9 +50,11 @@ DEFAULT_MODELS = {
     ),
 }
 
-KEY_ENV_MAP = {"deepseek": "DEEPSEEK_API_KEY", "qwen-vl": "DASHSCOPE_API_KEY"}
+KEY_ENV_MAP = {"deepseek": "DEEPSEEK_API_KEY", "deepseek-v4-pro": "DEEPSEEK_API_KEY", "deepseek-reasoner": "DEEPSEEK_API_KEY", "qwen-vl": "DASHSCOPE_API_KEY"}
 KEY_PROMPTS = {
     "deepseek": ("DeepSeek API Key", "https://platform.deepseek.com/api_keys"),
+    "deepseek-v4-pro": ("DeepSeek API Key (same as DeepSeek)", "https://platform.deepseek.com/api_keys"),
+    "deepseek-reasoner": ("DeepSeek API Key (same as DeepSeek)", "https://platform.deepseek.com/api_keys"),
     "qwen-vl": ("Qwen-VL API Key (阿里云百炼)", "https://bailian.console.aliyun.com"),
 }
 
@@ -64,7 +80,7 @@ class Config(BaseModel):
     models: dict[str, ModelConfig] = DEFAULT_MODELS
     memory: MemoryConfig = MemoryConfig()
     tools: ToolConfig = ToolConfig()
-    default_model: str = "deepseek"
+    default_model: str = "deepseek-v4-pro"
     web_port: int = 9527
     web_host: str = "127.0.0.1"
 
@@ -72,20 +88,34 @@ class Config(BaseModel):
     def load(cls) -> "Config":
         cfg = cls()
         if CONFIG_PATH.exists():
-            with open(CONFIG_PATH) as f:
-                data = yaml.safe_load(f) or {}
-            if data.get("models"):
-                for k, v in data["models"].items():
-                    if isinstance(v, dict) and k in cfg.models:
-                        cfg.models[k] = ModelConfig(**{**cfg.models[k].model_dump(), **v})
-            for k in ["default_model", "web_port", "web_host"]:
-                if k in data:
-                    setattr(cfg, k, data[k])
+            try:
+                with open(CONFIG_PATH) as f:
+                    data = yaml.safe_load(f) or {}
+            except (yaml.YAMLError, OSError):
+                data = {}
+            if isinstance(data, dict):
+                if data.get("models"):
+                    for k, v in data["models"].items():
+                        if isinstance(v, dict) and k in cfg.models:
+                            try:
+                                cfg.models[k] = ModelConfig(**{**cfg.models[k].model_dump(), **v})
+                            except Exception:
+                                pass
+                for k in ["default_model", "web_port", "web_host"]:
+                    if k in data:
+                        setattr(cfg, k, data[k])
         # Env vars override
         for name, env_var in KEY_ENV_MAP.items():
             env_val = os.environ.get(env_var, "")
             if env_val and name in cfg.models:
                 cfg.models[name].api_key = env_val
+        # Share API keys across same-provider models
+        for name, mc in cfg.models.items():
+            if not mc.api_key:
+                for other_name, other_mc in cfg.models.items():
+                    if other_mc.api_key and other_mc.provider == mc.provider:
+                        mc.api_key = other_mc.api_key
+                        break
         return cfg
 
     def save(self):
@@ -95,17 +125,27 @@ class Config(BaseModel):
             models_dict[name] = {
                 "provider": mc.provider, "model": mc.model,
                 "api_key": mc.api_key, "base_url": mc.base_url,
+                "max_tokens": mc.max_tokens, "temperature": mc.temperature,
             }
-        with open(CONFIG_PATH, "w") as f:
+        tmp = CONFIG_PATH.with_suffix(".yaml.tmp")
+        with open(tmp, "w") as f:
             yaml.dump({
                 "default_model": self.default_model,
                 "models": models_dict,
             }, f, allow_unicode=True)
+        tmp.rename(CONFIG_PATH)
 
     def set_key(self, name: str, key: str):
         if name in self.models:
             self.models[name].api_key = key
+            # Propagate to same-provider sibling models
+            provider = self.models[name].provider
+            for other_name, other_mc in self.models.items():
+                if other_mc.provider == provider:
+                    other_mc.api_key = key
             self.save()
+            return True
+        return False
 
     def missing_keys(self) -> list[str]:
         return [n for n, mc in self.models.items() if not mc.api_key and n in KEY_ENV_MAP]

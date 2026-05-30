@@ -7,6 +7,7 @@ from pathlib import Path
 
 import typer
 from rich.console import Console
+from rich.markup import escape as rich_escape
 from rich.prompt import Prompt
 from rich.live import Live
 from rich.spinner import Spinner
@@ -103,36 +104,53 @@ def _format_tool_args(args: dict) -> str:
     parts = []
     for k, v in args.items():
         val = str(v)
-        if len(val) > 40:
-            val = val[:37] + "..."
-        # Escape internal quotes
-        val = val.replace('"', '\\"')
-        parts.append(f'{k}="{val}"')
+        if len(val) > 50:
+            val = val[:47] + "..."
+        parts.append(f'{k}="{rich_escape(val)}"')
     return "(" + ", ".join(parts) + ")"
 
 
 # ── Streaming display engine ───────────────────────────
 
+def _is_system_message(text: str) -> bool:
+    """Filter internal system messages from display output."""
+    return any(text.lstrip().startswith(p) for p in (
+        "\n[thinking detected",
+        "\n[stopped:",
+        "\n[stream error:",
+    ))
+
+
 def _stream_response(orch: Orchestrator, user_input: str):
-    """Claude Code-style streaming: ⏳ Thinking... → ⏺ tool → ⎿ result → text."""
+    """Streaming display: ⏳ thinking preview → ⏺ tool call → ⎿ result → clean response."""
     events = orch.chat_stream(user_input)
 
-    tool_lines: list[str] = []      # tool calls + results (persistent)
-    response_text = ""              # accumulated raw text (never reset — preserves all thinking)
+    tool_lines: list[str] = []
+    response_chunks: list[str] = []
     spinner = Spinner("dots", text=f"  [{AMBER}]⏳[/{AMBER}] [{DIM}]Thinking...[/{DIM}]", style=DIM)
 
     def _build_display() -> str:
-        """Build display: tool lines + clean accumulated text."""
-        display = "\n".join(tool_lines)
-        clean = _clean_text(response_text)
-        if clean.strip():
-            display += ("\n" if display else "") + clean
-        return display or ""
+        parts: list[str] = []
 
-    with Live(spinner, console=console, refresh_per_second=12, transient=False) as live:
+        # Tool calls & results
+        parts.extend(tool_lines)
+
+        # Clean response text
+        raw = "".join(response_chunks)
+        clean = _clean_text(raw)
+        if clean.strip():
+            parts.append(rich_escape(clean.strip()))
+
+        return "\n".join(parts)
+
+    with Live(spinner, console=console, refresh_per_second=30, transient=False) as live:
         for event in events:
-            if event.kind == "chunk":
-                response_text += event.data
+            if event.kind == "thinking":
+                pass  # Hide thinking — just keep spinner
+
+            elif event.kind == "chunk":
+                if not _is_system_message(event.data):
+                    response_chunks.append(event.data)
                 live.update(_build_display() or spinner)
 
             elif event.kind == "tool_call":
@@ -145,14 +163,15 @@ def _stream_response(orch: Orchestrator, user_input: str):
 
             elif event.kind == "tool_result":
                 data = event.data
-                status = "✓" if data["exit_code"] == 0 else "✗"
-                color = GREEN if data["exit_code"] == 0 else RED
+                ok = data["exit_code"] == 0
+                mark, color = ("✓", GREEN) if ok else ("✗", RED)
                 output = data["output"].strip()
                 first_line = output.split("\n")[0] if output else "(no output)"
-                if len(first_line) > 100:
-                    first_line = first_line[:97] + "..."
+                if len(first_line) > 110:
+                    first_line = first_line[:107] + "..."
                 tool_lines.append(
-                    f"  [{DIM}]⎿[/{DIM}] [{color}]{status}[/{color}] [{DIM}]{first_line}  ({data['duration_ms']:.0f}ms)[/{DIM}]"
+                    f"  [{DIM}]⎿[/{DIM}] [{color}]{mark}[/{color}] [{DIM}]{rich_escape(first_line)}  "
+                    f"({data['duration_ms']:.0f}ms)[/{DIM}]"
                 )
                 live.update(_build_display() or spinner)
 
@@ -173,7 +192,6 @@ def ask(
     orch = Orchestrator(model=model)
     start = time.time()
 
-    # Use streaming display
     n_tools = _stream_response(orch, prompt)
 
     elapsed = time.time() - start
@@ -188,7 +206,11 @@ def repl(
 ):
     orch = Orchestrator(model=model)
 
-    # Claude Code: first-time just shows API setup, then prompt directly
+    # Startup banner
+    console.print()
+    console.print(f"  [{AMBER}]╭─ X-Agent ──────────────────────────╮[/{AMBER}]")
+    console.print(f"  [{AMBER}]│[/{AMBER}] [{WHITE}]{orch.model}[/{WHITE}] · {len(tool_registry._tools)} tools · /help       [{AMBER}]│[/{AMBER}]")
+    console.print(f"  [{AMBER}]╰────────────────────────────────────╯[/{AMBER}]")
     turn = 0
 
     while True:
@@ -234,15 +256,18 @@ def _handle_slash(cmd: str, orch: Orchestrator, current_model: str):
         console.print(f"""
   [{AMBER}]Commands[/{AMBER}]
     /model <name>    Switch model (deepseek, qwen-vl, ollama)
+    /explore         Browse latest ClawHub skills
     /search <query>  Search ClawHub for skills
     /install <slug>  Install a skill from ClawHub
     /uninstall <name>  Remove an installed skill
-    /memory          Show recent memories
     /skills          List installed skills
+    /memory          Show recent memories
     /clear           Clear conversation
     /stats           Session stats
     /help            This help
     /exit            Quit
+
+  [{AMBER}]X-Agent[/{AMBER}] [{DIM}]— AI Agent Framework · 16 tools[/{DIM}]
 
   [{AMBER}]Tips[/{AMBER}]
     End a line with \\\\ for multiline input
@@ -253,6 +278,8 @@ def _handle_slash(cmd: str, orch: Orchestrator, current_model: str):
         console.print(f"  [{AMBER}]⏣[/{AMBER}] [{DIM}]model →[/{DIM}] {orch.model}")
     elif action == "/memory":
         _show_memory()
+    elif action == "/explore":
+        _explore_skills()
     elif action == "/skills":
         _show_skills()
     elif action == "/search":
@@ -273,6 +300,31 @@ def _handle_slash(cmd: str, orch: Orchestrator, current_model: str):
     else:
         console.print(f"  [{RED}]Unknown: {action}[/{RED}]  [{DIM}]type /help[/{DIM}]")
 
+
+def _explore_skills():
+    """Browse latest ClawHub skills."""
+    with console.status(f"  [{DIM}]Fetching ClawHub...[/{DIM}]", spinner="dots"):
+        import subprocess, re as _re
+        try:
+            r = subprocess.run(["clawhub", "explore"], capture_output=True, text=True, timeout=30)
+            output = r.stdout.strip()
+        except Exception as e:
+            console.print(f"  [{RED}]Failed: {e}[/{RED}]")
+            return
+    if not output:
+        console.print(f"  [{DIM}]No results[/{DIM}]")
+        return
+    # Strip ANSI and control characters
+    output = _re.sub(r'\x1b\[[0-9;]*m', '', output)
+    output = _re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', '', output)
+    console.print(f"\n  [{AMBER}]ClawHub — Latest Skills[/{AMBER}]")
+    for line in output.split("\n")[:25]:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("- "):
+            continue
+        # Parse: slug  version  time  description
+        console.print(f"  [{GREEN}]✦[/{GREEN}] [{DIM}]{stripped[:120]}[/{DIM}]")
+    console.print(f"\n  [{DIM}]Install: /install <slug>  |  Search: /search <query>[/{DIM}]")
 
 def _show_memory():
     hot = memory_store.get_hot()
@@ -346,16 +398,6 @@ def tui(
     import os
     os.environ["AGENT_MODEL"] = model
     AgentTUI().run()
-
-
-@app.command()
-def web(
-    port: int = typer.Option(9527, "--port", "-p"),
-    host: str = typer.Option("127.0.0.1", "--host"),
-):
-    import uvicorn
-    console.print(f"  [{AMBER}]⏣[/{AMBER}] X-Agent Web [{DIM}]→ http://{host}:{port}[/{DIM}]")
-    uvicorn.run("web.backend.server:app", host=host, port=port, reload=True)
 
 
 def main():

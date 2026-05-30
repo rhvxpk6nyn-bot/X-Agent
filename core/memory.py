@@ -29,7 +29,7 @@ def _get_fts() -> sqlite3.Connection:
 class Memory:
     def __init__(self, memory_id="", mtype="note", title="", content="",
                  tags=None, importance=0.5, created_at=None):
-        self.id = memory_id or f"mem-{int(time.time())}"
+        self.id = memory_id or f"mem-{time.time_ns()}"
         self.type = mtype
         self.title = title
         self.content = content
@@ -75,7 +75,10 @@ class MemoryStore:
         path = dest / f"{mem.id}.md"
         path.write_text(f"---\n{yaml.dump({'id':mem.id,'type':mem.type,'title':mem.title,'tags':mem.tags,'importance':mem.importance,'created_at':mem.created_at})}---\n\n{mem.content}")
         db = _get_fts()
-        db.execute("INSERT OR REPLACE INTO mem_fts(id, title, content, tags) VALUES(?,?,?,?)",
+        # FTS5 has no UNIQUE constraint, so INSERT OR REPLACE would duplicate.
+        # Delete any existing row for this id first to keep it idempotent.
+        db.execute("DELETE FROM mem_fts WHERE id = ?", (mem.id,))
+        db.execute("INSERT INTO mem_fts(id, title, content, tags) VALUES(?,?,?,?)",
                    (mem.id, mem.title, mem.content, " ".join(mem.tags)))
         db.commit()
 
@@ -99,7 +102,7 @@ class MemoryStore:
         fts_query = " ".join(safe_words)
         try:
             rows = db.execute(
-                "SELECT id FROM mem_fts WHERE mem_fts MATCH ? ORDER BY rank LIMIT ?",
+                "SELECT id, rank FROM mem_fts WHERE mem_fts MATCH ? ORDER BY rank LIMIT ?",
                 (fts_query, top_k * 2)
             ).fetchall()
         except sqlite3.OperationalError:
@@ -107,20 +110,25 @@ class MemoryStore:
             try:
                 simple_query = " OR ".join(safe_words).replace("*", "")
                 rows = db.execute(
-                    "SELECT id FROM mem_fts WHERE mem_fts MATCH ? ORDER BY rank LIMIT ?",
+                    "SELECT id, rank FROM mem_fts WHERE mem_fts MATCH ? ORDER BY rank LIMIT ?",
                     (simple_query, top_k * 2)
                 ).fetchall()
             except sqlite3.OperationalError:
                 rows = []
-        mems = []
-        for (mid,) in rows:
+        scored = []
+        for mid, rank in rows:
             for root in [HOT_DIR, WARM_DIR, COLD_DIR]:
                 p = Path(root) / f"{mid}.md"
                 if p.exists():
-                    mems.append(Memory.from_file(p))
+                    mem = Memory.from_file(p)
+                    # FTS5 rank is negative; more negative = more relevant.
+                    # Combine relevance with decay score and a small tag boost.
+                    relevance = -rank if rank is not None else 1.0
+                    final = relevance * mem.score * (1 + 0.1 * len(mem.tags))
+                    scored.append((final, mem))
                     break
-        mems.sort(key=lambda m: m.score * (1 + 0.1 * len(m.tags)), reverse=True)
-        return mems[:top_k]
+        scored.sort(key=lambda t: t[0], reverse=True)
+        return [m for _, m in scored[:top_k]]
 
 
 store = MemoryStore()

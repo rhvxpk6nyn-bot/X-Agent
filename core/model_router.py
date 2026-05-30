@@ -2,6 +2,8 @@
 
 import base64
 import io
+import sys
+import traceback
 from pathlib import Path
 from typing import AsyncIterator, Iterator, Literal
 from openai import AsyncOpenAI, OpenAI
@@ -12,13 +14,13 @@ from core.config import config, ModelConfig
 # ── Client factory ───────────────────────────────────
 
 def _make_client(mc: ModelConfig) -> OpenAI:
-    kwargs = {"api_key": mc.api_key, "base_url": mc.base_url}
+    kwargs = {"api_key": mc.api_key, "base_url": mc.base_url, "timeout": 120.0}
     if not mc.api_key and mc.provider == "ollama":
         kwargs["api_key"] = "ollama"  # Ollama doesn't require real key
     return OpenAI(**kwargs)
 
 def _make_async_client(mc: ModelConfig) -> AsyncOpenAI:
-    kwargs = {"api_key": mc.api_key, "base_url": mc.base_url}
+    kwargs = {"api_key": mc.api_key, "base_url": mc.base_url, "timeout": 120.0}
     if not mc.api_key and mc.provider == "ollama":
         kwargs["api_key"] = "ollama"
     return AsyncOpenAI(**kwargs)
@@ -80,19 +82,25 @@ def chat(
     max_tokens: int | None = None,
     temperature: float | None = None,
     stream: bool = False,
-) -> str | Iterator[str]:
+) -> str | Iterator[str | dict]:
     """Synchronous chat completion. Returns string or stream iterator."""
     model_name = model or config.default_model
-    mc = config.models[model_name]
+    mc = config.models.get(model_name)
+    if not mc:
+        raise ValueError(f"Unknown model: {model_name}")
     client = _get_client(model_name)
 
     kwargs = {
         "model": mc.model,
         "messages": messages,
-        "max_tokens": max_tokens or mc.max_tokens,
-        "temperature": temperature or mc.temperature,
+        "max_tokens": max_tokens if max_tokens is not None else mc.max_tokens,
+        "temperature": temperature if temperature is not None else mc.temperature,
         "stream": stream,
     }
+
+    # Enable DeepSeek thinking mode with budget (not reasoner, which has it built-in)
+    if mc.provider == "deepseek" and "reasoner" not in mc.model:
+        kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
 
     if stream:
         response = client.chat.completions.create(**kwargs)
@@ -110,14 +118,21 @@ async def achat(
 ) -> str:
     """Async chat completion."""
     model_name = model or config.default_model
-    mc = config.models[model_name]
+    mc = config.models.get(model_name)
+    if not mc:
+        raise ValueError(f"Unknown model: {model_name}")
     client = _get_async_client(model_name)
+
+    extra = {}
+    if mc.provider == "deepseek" and "reasoner" not in mc.model:
+        extra["extra_body"] = {"thinking": {"type": "enabled"}}
 
     resp = await client.chat.completions.create(
         model=mc.model,
         messages=messages,
-        max_tokens=max_tokens or mc.max_tokens,
-        temperature=temperature or mc.temperature,
+        max_tokens=max_tokens if max_tokens is not None else mc.max_tokens,
+        temperature=temperature if temperature is not None else mc.temperature,
+        **extra,
     )
     return resp.choices[0].message.content or ""
 
@@ -140,15 +155,35 @@ def vision(
     return chat(
         messages=[{"role": "user", "content": content}],
         model=model,
-        max_tokens=max_tokens or 1024,
+        max_tokens=max_tokens if max_tokens is not None else 1024,
         temperature=0.0,
     )
 
 
-def _stream_iter(response) -> Iterator[str]:
-    for chunk in response:
-        if chunk.choices[0].delta.content:
-            yield chunk.choices[0].delta.content
+def _stream_iter(response) -> Iterator[str | dict]:
+    finish = None
+    has_reasoning = False
+    try:
+        for chunk in response:
+            if not chunk.choices:
+                continue
+            delta = chunk.choices[0].delta
+            if delta is None:
+                if chunk.choices[0].finish_reason:
+                    finish = chunk.choices[0].finish_reason
+                continue
+            reasoning = getattr(delta, "reasoning_content", None)
+            if reasoning:
+                has_reasoning = True
+                yield {"_reasoning": reasoning}
+            if delta.content:
+                yield delta.content
+            if chunk.choices[0].finish_reason:
+                finish = chunk.choices[0].finish_reason
+    except Exception:
+        traceback.print_exc(file=sys.stderr)
+        finish = None
+    yield {"_finish_reason": finish or "unknown", "_has_reasoning": has_reasoning}
 
 
 # ── Embedding ────────────────────────────────────────

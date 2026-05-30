@@ -113,13 +113,13 @@ def edit_file(path: str, old: str, new: str) -> str:
     if not p.exists():
         return f"[error] File not found: {path}"
     content = p.read_text()
-    if old not in content:
+    idx = content.find(old)
+    if idx < 0:
         return f"[error] String not found in {path}. Use read first to check exact content."
-    content = content.replace(old, new, 1)
-    p.write_text(content)
-    # Show context of the edit
-    idx = content.find(new)
+    # Line number of the edit, computed from the original match position
     line_num = content[:idx].count("\n") + 1
+    content = content[:idx] + new + content[idx + len(old):]
+    p.write_text(content)
     return f"Edited {path} (line ~{line_num})"
 
 
@@ -225,11 +225,114 @@ def web_fetch(url: str) -> str:
         return f"Fetch failed: {e}"
 
 
+def web_search(query: str, max_results: int = 8) -> str:
+    """Search the web using Bing. Returns titles + snippets + URLs."""
+    import urllib.request
+    import urllib.parse
+    try:
+        qs = urllib.parse.urlencode({"q": query, "count": str(max_results), "setlang": "zh-CN"})
+        url = f"https://www.bing.com/search?{qs}"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml",
+            "Accept-Language": "zh-CN,zh;q=0.9",
+        }
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            html = resp.read().decode("utf-8", errors="replace")
+    except Exception as e:
+        return f"Search failed: {e}"
+
+    import re
+    results = []
+    # Bing result blocks: li.b_algo > h2 > a for title+url, div/p.b_caption for snippet
+    blocks = re.findall(
+        r'<li[^>]*class="[^"]*b_algo[^"]*"[^>]*>.*?<a[^>]*href="(https?://[^"]*)"[^>]*>(.*?)</a>',
+        html, re.DOTALL | re.IGNORECASE
+    )
+    snippets = re.findall(
+        r'<(?:div|p)[^>]*class="[^"]*b_caption[^"]*"[^>]*>\s*<p[^>]*>(.*?)</p>',
+        html, re.DOTALL | re.IGNORECASE
+    )
+    if not snippets:
+        snippets = re.findall(
+            r'<(?:div|p)[^>]*class="[^"]*(?:b_lineclamp|b_algoSlug|b_caption)[^"]*"[^>]*>(.*?)</(?:div|p)>',
+            html, re.DOTALL | re.IGNORECASE
+        )
+
+    for i, (raw_url, title) in enumerate(blocks[:max_results]):
+        title = re.sub(r"<[^>]+>", "", title).strip()
+        if not title:
+            continue
+        snippet = ""
+        if i < len(snippets):
+            snippet = re.sub(r"<[^>]+>", "", snippets[i]).strip()
+        results.append(f"{title}\n  {snippet}\n  {raw_url}")
+
+    if not results:
+        return f"No results found for '{query}'"
+    return f"Search: {query}\n" + "\n\n".join(results)
+
+
 def browse(url: str) -> str:
     """Open URL in default browser."""
     import webbrowser
     webbrowser.open(url)
     return f"Opened {url}"
+
+
+def open_app(app: str, wait: bool = False) -> str:
+    """Open a macOS application by common name or bundle id."""
+    if not app.strip():
+        return "[error] app name required"
+
+    aliases = {
+        "apple music": "Music",
+        "music": "Music",
+        "音乐": "Music",
+        "safari": "Safari",
+        "chrome": "Google Chrome",
+        "google chrome": "Google Chrome",
+        "谷歌浏览器": "Google Chrome",
+        "wechat": "WeChat",
+        "微信": "WeChat",
+        "pycharm": "PyCharm",
+        "final cut": "Final Cut Pro",
+        "final cut pro": "Final Cut Pro",
+        "剪映": "剪映专业版",
+        "keynote": "Keynote",
+        "pages": "Pages",
+        "numbers": "Numbers",
+        "finder": "Finder",
+        "terminal": "Terminal",
+        "终端": "Terminal",
+        "settings": "System Settings",
+        "system settings": "System Settings",
+        "系统设置": "System Settings",
+    }
+
+    raw = app.strip()
+    target = aliases.get(raw.lower(), raw)
+
+    commands = [
+        ["open", "-a", target],
+        ["open", "-b", raw],
+    ]
+    if wait:
+        commands[0].insert(1, "-W")
+
+    errors = []
+    for cmd in commands:
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
+        except Exception as e:
+            errors.append(str(e))
+            continue
+        if result.returncode == 0:
+            return f"Opened app: {target}"
+        errors.append((result.stderr or result.stdout or "").strip())
+
+    return f"[error] Could not open app '{app}' as '{target}'. " + " | ".join(e for e in errors if e)
 
 
 def mano_cua(task: str, app: str | None = None, url: str | None = None,
@@ -262,7 +365,12 @@ def music(action: str = "play", song: str = "", artist: str = "",
     if not shutil.which("osascript"):
         return "[error] osascript not available (macOS only)"
 
+    def _osa(s: str) -> str:
+        # Escape for safe embedding inside an AppleScript double-quoted string
+        return s.replace("\\", "\\\\").replace('"', '\\"')
+
     action = action.lower()
+    song, artist, album, playlist = _osa(song), _osa(artist), _osa(album), _osa(playlist)
     try:
         if action == "play":
             if song:
@@ -347,147 +455,168 @@ def music(action: str = "play", song: str = "", artist: str = "",
 
 
 def sysinfo() -> str:
-    """Gather comprehensive system info: OS, hardware, disk, apps, dev tools, network."""
-    import platform
+    """Gather essential system info at startup."""
+    import platform, os, shutil
     sections = []
 
     # ── OS ──
-    sections.append("## Operating System")
-    sections.append(f"  System:   {platform.system()} {platform.release()}")
-    sections.append(f"  Version:  {platform.version()}")
-    sections.append(f"  Arch:     {platform.machine()}")
-    try:
-        r = subprocess.run(["sw_vers"], capture_output=True, text=True, timeout=5)
-        if r.returncode == 0:
-            for line in r.stdout.strip().split("\n"):
-                sections.append(f"  {line.strip()}")
-    except Exception:
-        pass
+    sections.append(f"OS: {platform.system()} {platform.release()} ({platform.machine()})")
 
     # ── Hardware ──
-    sections.append("\n## Hardware")
     try:
         r = subprocess.run(["sysctl", "-n", "machdep.cpu.brand_string"], capture_output=True, text=True, timeout=5)
         if r.returncode == 0:
-            sections.append(f"  CPU:      {r.stdout.strip()}")
+            sections.append(f"CPU: {r.stdout.strip()}")
     except Exception:
         pass
     try:
         r = subprocess.run(["sysctl", "-n", "hw.memsize"], capture_output=True, text=True, timeout=5)
         if r.returncode == 0:
-            mem_bytes = int(r.stdout.strip())
-            sections.append(f"  RAM:      {mem_bytes // (1024**3)} GB")
-    except Exception:
-        pass
-    try:
-        r = subprocess.run(["sysctl", "-n", "hw.model"], capture_output=True, text=True, timeout=5)
-        if r.returncode == 0:
-            sections.append(f"  Model:    {r.stdout.strip()}")
+            sections.append(f"RAM: {int(r.stdout.strip()) // (1024**3)} GB")
     except Exception:
         pass
 
     # ── Disk ──
-    sections.append("\n## Disk Usage")
-    try:
-        r = subprocess.run(["df", "-h", "/"], capture_output=True, text=True, timeout=5)
-        if r.returncode == 0:
-            lines = r.stdout.strip().split("\n")
-            if len(lines) >= 2:
-                parts = lines[1].split()
-                if len(parts) >= 5:
-                    sections.append(f"  Root:     {parts[2]} used / {parts[1]} total ({parts[4]} used)")
-    except Exception:
-        pass
     try:
         r = subprocess.run(["df", "-h", str(Path.home())], capture_output=True, text=True, timeout=5)
         if r.returncode == 0:
-            lines = r.stdout.strip().split("\n")
-            if len(lines) >= 2:
-                parts = lines[1].split()
-                if len(parts) >= 5:
-                    sections.append(f"  Home:     {parts[2]} used / {parts[1]} total ({parts[4]} used)")
+            parts = r.stdout.strip().split("\n")[1].split()
+            if len(parts) >= 5:
+                sections.append(f"Disk: {parts[2]} used / {parts[1]} total ({parts[4]} used)")
     except Exception:
         pass
 
-    # ── Installed Apps ──
-    sections.append("\n## Installed Applications (top 40)")
-    app_dirs = [Path("/Applications"), Path.home() / "Applications"]
-    apps_found = []
-    for ad in app_dirs:
-        if ad.exists():
-            for item in sorted(ad.iterdir()):
-                if item.suffix == ".app" and not item.name.startswith("."):
-                    apps_found.append(item.stem)
-    if apps_found:
-        sections.append("  " + ", ".join(apps_found[:40]))
-    else:
-        sections.append("  (none found)")
-
-    # ── Dev Tools ──
-    sections.append("\n## Development Tools")
-    tools_list = [
-        ("python3", ["python3", "--version"]),
-        ("python", ["python", "--version"]),
-        ("node", ["node", "--version"]),
-        ("npm", ["npm", "--version"]),
-        ("git", ["git", "--version"]),
-        ("pip3", ["pip3", "--version"]),
-        ("brew", ["brew", "--version"]),
-        ("docker", ["docker", "--version"]),
-        ("go", ["go", "version"]),
-        ("rustc", ["rustc", "--version"]),
-    ]
-    import shutil
-    for name, cmd in tools_list:
-        try:
-            path = shutil.which(name)
-            if path:
-                r = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
-                ver = r.stdout.strip().split("\n")[0][:80]
-                sections.append(f"  {name}:  {ver}  ({path})")
-            else:
-                sections.append(f"  {name}:  (not installed)")
-        except Exception:
-            sections.append(f"  {name}:  (error checking)")
-
-    # ── Network ──
-    sections.append("\n## Network")
-    sections.append(f"  Hostname: {platform.node()}")
-    try:
-        r = subprocess.run(["ifconfig", "en0"], capture_output=True, text=True, timeout=5)
-        if r.returncode == 0:
-            for line in r.stdout.split("\n"):
-                line = line.strip()
-                if "inet " in line and "netmask" in line:
-                    sections.append(f"  en0:      {line}")
-                    break
-    except Exception:
-        pass
-
-    # ── Home Directory ──
-    sections.append("\n## Home Directory Overview")
-    home = Path.home()
-    try:
-        top_items = sorted([p for p in home.iterdir() if not p.name.startswith(".")],
-                          key=lambda p: (not p.is_dir(), p.name.lower()))
-        dirs = [f"{p.name}/" for p in top_items if p.is_dir()][:20]
-        files = [p.name for p in top_items if p.is_file()][:10]
-        if dirs:
-            sections.append("  Dirs:  " + ", ".join(dirs))
-        if files:
-            sections.append("  Files: " + ", ".join(files))
-    except Exception:
-        pass
+    # ── Dev Tools (presence only, no versions) ──
+    tools_found = [t for t in ["python3", "node", "npm", "git", "pip3", "brew", "docker", "go"] if shutil.which(t)]
+    if tools_found:
+        sections.append(f"Tools: {', '.join(tools_found)}")
 
     # ── Shell & User ──
-    sections.append("\n## Shell & User")
-    import os
-    sections.append(f"  User:     {os.environ.get('USER', 'unknown')}")
-    sections.append(f"  Shell:    {os.environ.get('SHELL', 'unknown')}")
-    sections.append(f"  Home:     {home}")
-    sections.append(f"  PATH:     {os.environ.get('PATH', '')[:300]}")
+    sections.append(f"User: {os.environ.get('USER', 'unknown')}  Shell: {os.environ.get('SHELL', 'unknown')}  Home: {Path.home()}")
 
     return "\n".join(sections)
+
+
+def memory_add(mtype: str = "note", title: str = "", content: str = "",
+               tags: str = "", importance: float = 0.5) -> str:
+    """Save a memory for later recall. Use proactively: user preferences, project decisions,
+    feedback patterns, facts worth remembering across sessions.
+    mtype: note, fact, rule, feedback, preference, project, reference
+    importance: 0.1 (trivial) to 1.0 (critical), default 0.5"""
+    from core.memory import store, Memory
+    import time
+    mem = Memory(
+        memory_id=f"auto-{time.time_ns()}",
+        mtype=mtype,
+        title=title,
+        content=content,
+        tags=[t.strip() for t in tags.split(",") if t.strip()],
+        importance=importance,
+    )
+    store.add(mem, "warm")
+    return f"Memory saved: {title} (type={mtype}, importance={importance})"
+
+
+def browser(action: str, url: str = "", selector: str = "",
+            text: str = "", js: str = "") -> str:
+    """Control Google Chrome via AppleScript + JS injection.
+    action: navigate | content | click | type | run_js | screenshot
+    - navigate url="https://..."       → open URL in Chrome (waits 2s for load)
+    - content  selector="..."          → get page text (optional CSS selector for subset)
+    - click    selector="button.login" → click element (by CSS selector or visible text)
+    - type     selector="#search" text="..."  → set value + fire input/change events
+    - run_js   js="document.title"     → execute JS, return result
+    - screenshot                       → save /tmp/browser_*.png, return path
+    """
+    def _osa(script: str, timeout: int = 20) -> tuple[str, str]:
+        r = subprocess.run(["osascript", "-e", script],
+                           capture_output=True, text=True, timeout=timeout)
+        return r.stdout.strip(), r.stderr.strip()
+
+    def _js(code: str) -> str:
+        # Wrap in IIFE; escape code for AppleScript string literal
+        escaped = code.replace("\\", "\\\\").replace('"', '\\"')
+        out, err = _osa(
+            f'tell application "Google Chrome"\n'
+            f'  execute active tab of first window javascript "{escaped}"\n'
+            f'end tell'
+        )
+        return out or (f"[error] {err}" if err else "(no result)")
+
+    action = action.lower().strip()
+
+    if action == "navigate":
+        if not url:
+            return "[error] url required"
+        esc = url.replace("\\", "\\\\").replace('"', '\\"')
+        out, err = _osa(
+            f'tell application "Google Chrome"\n'
+            f'  if (count of windows) = 0 then make new window\n'
+            f'  set URL of active tab of first window to "{esc}"\n'
+            f'  activate\n'
+            f'end tell'
+        )
+        if err and "error" in err.lower():
+            return f"[error] {err}"
+        import time as _time; _time.sleep(2)
+        return f"Navigated to: {url}"
+
+    elif action == "content":
+        if selector:
+            esc = selector.replace("'", "\\'")
+            code = f"(function(){{var e=document.querySelector('{esc}');return e?e.innerText.trim().slice(0,8000):'[not found]'}})()"
+        else:
+            code = "document.body.innerText.trim().slice(0,8000)"
+        return _js(code)
+
+    elif action == "click":
+        if not selector:
+            return "[error] selector required"
+        esc = selector.replace("'", "\\'").replace('"', '\\"')
+        code = (
+            "(function(){"
+            f"var el=document.querySelector('{esc}');"
+            "if(!el){"
+            f"  var all=document.querySelectorAll('a,button,input,[role=button]');"
+            f"  for(var i=0;i<all.length;i++){{if(all[i].textContent.trim().includes('{esc}')){{el=all[i];break;}}}}"
+            "}"
+            "if(el){el.click();return 'clicked: '+(el.textContent.trim().slice(0,60)||el.tagName);}"
+            f"return '[error] not found: {esc}';"
+            "})()"
+        )
+        return _js(code)
+
+    elif action == "type":
+        if not selector or not text:
+            return "[error] selector and text required"
+        esc_sel = selector.replace("'", "\\'")
+        esc_text = text.replace("\\", "\\\\").replace("'", "\\'")
+        code = (
+            "(function(){"
+            f"var el=document.querySelector('{esc_sel}');"
+            "if(!el)return '[error] element not found';"
+            "el.focus();"
+            f"el.value='{esc_text}';"
+            "el.dispatchEvent(new Event('input',{bubbles:true}));"
+            "el.dispatchEvent(new Event('change',{bubbles:true}));"
+            "return 'typed into: '+(el.name||el.id||el.tagName);"
+            "})()"
+        )
+        return _js(code)
+
+    elif action == "run_js":
+        if not js:
+            return "[error] js required"
+        return _js(js)
+
+    elif action == "screenshot":
+        path = f"/tmp/browser_{int(time.time())}.png"
+        r = subprocess.run(["screencapture", "-x", path],
+                           capture_output=True, text=True, timeout=10)
+        return f"Screenshot saved: {path}" if r.returncode == 0 else f"[error] {r.stderr}"
+
+    else:
+        return "[error] Unknown action. Use: navigate, content, click, type, run_js, screenshot"
 
 
 # ── Global instance ──────────────────────────────────
@@ -501,7 +630,11 @@ tools.register("line_edit", line_edit)
 tools.register("grep", grep)
 tools.register("glob", glob_files)
 tools.register("web_fetch", web_fetch)
+tools.register("web_search", web_search)
 tools.register("browse", browse)
+tools.register("open_app", open_app)
 tools.register("mano_cua", mano_cua)
 tools.register("sysinfo", sysinfo)
 tools.register("music", music)
+tools.register("memory_add", memory_add)
+tools.register("browser", browser)

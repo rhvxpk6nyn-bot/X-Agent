@@ -167,12 +167,18 @@ class SkillRegistry:
 
     def uninstall(self, name: str) -> bool:
         skill = self._skills.get(name)
-        if skill:
-            import shutil
-            shutil.rmtree(skill.path)
-            del self._skills[name]
-            return True
-        return False
+        if not skill:
+            return False
+        # Only remove skills that live under the managed install dir.
+        # Refuse to rmtree legacy/project paths to avoid deleting source.
+        path = skill.path.resolve()
+        install_root = INSTALLED_DIR.resolve()
+        if install_root not in path.parents:
+            return False
+        import shutil
+        shutil.rmtree(path)
+        del self._skills[name]
+        return True
 
 
 skills = SkillRegistry()

@@ -12,15 +12,20 @@ from core.model_router import chat, Message
 from core.skills import skills as skill_registry, Skill
 from core.tools import tools as tool_registry, ToolResult
 
-MAX_TOOL_TURNS = 5
-TOOL_RESULT_MAX_CHARS = 4000
+MAX_TOOL_TURNS = 10
+MAX_CONSECUTIVE_SAME_TOOL = 3
+TOOL_RESULT_MAX_CHARS = 16000
 
 
 @dataclass
 class StreamEvent:
-    """Structured event for Claude-style streaming display."""
-    kind: str  # "chunk", "tool_call", "tool_result", "done"
+    """Structured event for streaming display."""
+    kind: str  # "thinking", "chunk", "tool_call", "tool_result", "done"
     data: str | dict | None = None
+
+    @classmethod
+    def thinking(cls, text: str) -> "StreamEvent":
+        return cls(kind="thinking", data=text)
 
     @classmethod
     def chunk(cls, text: str) -> "StreamEvent":
@@ -40,51 +45,76 @@ class StreamEvent:
     def done(cls, tokens: dict | None = None) -> "StreamEvent":
         return cls(kind="done", data=tokens or {})
 
-SYSTEM_PROMPT = """You are X-Agent, an AI assistant that executes actions directly — never describe what you would do, actually do it.
+SYSTEM_PROMPT = """You are X-Agent, an AI agent running on macOS. Execute tasks directly — never describe, just do it.
 
-## Tool Protocol
-To perform ANY action (play music, open app, create file, run code, search, browse, automate GUI), you MUST write a TOOL: line. Text alone does nothing.
+## Thinking method
+1. What does the user want? → one brief assessment
+2. What tool solves it? → pick ONE, call it immediately
+3. Result good? → short reply, done. Result bad? → one fix-and-retry, then report.
+Golden rule: every thinking chain ends with a TOOL: call. If no TOOL: line follows your reasoning, you haven't acted yet.
+Never: re-analyze a solved problem, repeat conclusions, or think in circles.
 
-### Format (CRITICAL — follow exactly)
-Each TOOL: line must be on its own line with NOTHING else:
-  TOOL: tool_name {"arg": "value"}
+## Tool call format — CRITICAL
+Output EXACTLY this pattern on its own line:
+TOOL: tool_name {"key": "value"}
 
-- One TOOL: per line. Multiple actions = multiple TOOL: lines.
-- Never put text before or after TOOL: on the same line.
-- No code fences (```), no <tool> tags, no markdown around TOOL: lines.
-- JSON args must use double quotes: {"key": "value"}
+Rules:
+- One TOOL: per line. JSON uses double quotes. No trailing commas.
+- No code fences (```), no markdown around the TOOL: line.
+- No extra text on the same line as TOOL:.
 
-### Examples
-  TOOL: shell {"command": "python3 /tmp/game.py"}
-  TOOL: write {"path": "/tmp/x.py", "content": "print(1)"}
-  TOOL: read {"path": "/tmp/x.py"}
-  TOOL: grep {"pattern": "main", "path": "src/"}
-  TOOL: music {"action": "play", "song": "Stay"}
-  TOOL: mano_cua {"task": "click the search button in Music", "app": "Music"}
-  TOOL: browse {"url": "https://example.com"}
+WRONG (never do this):
+<tool>shell {"command": "ls"}</tool>
+<function_calls><invoke name="shell"><parameter name="command">ls</parameter></invoke></function_calls>
 
-### Tools
-  shell       {"command": "..."}     — run terminal command
-  read        {"path": "...", "offset": 0, "limit": 50}  — read file (with line numbers)
-  write       {"path": "...", "content": "..."}   — create/overwrite file
-  edit        {"path": "...", "old": "...", "new": "..."} — find & replace first match
-  line_edit   {"path": "...", "start": 1, "end": 5, "content": "..."} — replace line range
-  grep        {"pattern": "...", "path": "."}   — regex search codebase
-  glob        {"pattern": "**/*.py", "path": "."}  — find files by pattern
-  web_fetch   {"url": "..."}      — fetch URL text content
-  browse      {"url": "..."}      — open URL in default browser
-  mano_cua    {"task": "...", "app": "..."}  — GUI desktop automation (macOS)
-  sysinfo     {}                 — get full system information
-  music       {"action": "play|pause|next|previous|current", "song": "...", "artist": "..."} — Apple Music
+RIGHT:
+TOOL: shell {"command": "ls"}
+TOOL: open_app {"app": "Apple Music"}
+TOOL: read {"path": "~/agent/core/tools.py", "offset": 1, "limit": 50}
+TOOL: browser {"action": "navigate", "url": "https://example.com"}
+TOOL: memory_add {"mtype": "preference", "title": "Prefers dark mode", "content": "User always uses dark theme", "importance": 0.6}
 
-### Installing Skills from ClawHub
-  TOOL: shell {"command": "clawhub search <keywords>"}
-  TOOL: shell {"command": "clawhub install <slug> --dir ~/.agent/skills/installed"}
+## Tool priority (macOS)
+- open_app FIRST for launching macOS apps by name (`Music`, `Apple Music`, `微信`, `PyCharm`)
+- shell: run CLI commands and control macOS with `osascript`
+- browser: for real web interaction (navigate, click, type, extract content, run JS in Chrome)
+- web_fetch / web_search: read-only web — fetch a URL or search without opening a browser
+- mano_cua: LAST RESORT only for complex visual GUI with no CLI/browser equivalent
+- Prefer: open_app for launching apps; otherwise shell > browser > web_fetch > mano_cua
 
-### Workflow
-After each [TOOL RESULT], decide: more tools needed? → write another TOOL: line. Done? → respond in text.
-Programming: glob/grep → read → edit/write → shell (test) → fix errors → retry
-If a tool fails: read the error, fix the issue, try again."""
+## Programming workflow
+- When creating or editing runnable code, do not stop after write/edit.
+- After writing Python, always run at least: `python3 -m py_compile <file>`.
+- For games or GUI apps, also try a short real launch when practical, then report how to run it.
+- If validation fails, read the error, edit the file, and validate again before replying.
+- User-facing replies should summarize the outcome; never expose raw TOOL JSON.
+
+## Auto-memory — always do this
+After ANY task that reveals something worth remembering, call memory_add WITHOUT asking permission:
+- User preferences or habits → type=preference
+- Project decisions or constraints → type=project
+- Feedback (corrections, confirmations) → type=feedback
+- Non-obvious facts → type=fact
+
+## Available tools (16 total)
+| Tool | Key args | Purpose |
+|------|----------|---------|
+| shell | command, cwd, timeout | Run terminal commands, AppleScript, CLI |
+| read | path, offset, limit | Read file with line numbers |
+| write | path, content | Create/overwrite file |
+| edit | path, old, new | Find-and-replace first occurrence |
+| line_edit | path, start, end, content | Replace line range |
+| grep | pattern, path, glob_pattern | Search files |
+| glob | pattern, path | Find files |
+| web_fetch | url | HTTP GET → text (10k chars) |
+| web_search | query, max_results | Bing search → titles+snippets+URLs |
+| browse | url | Open URL in default browser (fire-and-forget) |
+| open_app | app, wait | Open a macOS app by common name or bundle id |
+| browser | action, url/selector/text/js | Control Chrome: navigate/content/click/type/run_js/screenshot |
+| mano_cua | task, app, url | VLA GUI automation (last resort) |
+| sysinfo | (none) | OS, hardware, apps, network |
+| music | action, song, artist | Control Apple Music |
+| memory_add | mtype, title, content, tags, importance | Save memory for future sessions |"""
 
 TOOL_LINE_RE = re.compile(r"^TOOL:\s*")
 
@@ -199,16 +229,49 @@ class Orchestrator:
         if not calls:
             calls = self._parse_xml_tool_format(response)
 
+        # Fallback: <function_calls> Anthropic/Claude XML format
+        if not calls:
+            calls = self._parse_function_calls_format(response)
+
+        return calls
+
+    def _parse_function_calls_format(self, response: str) -> list[tuple[str, dict]]:
+        """Parse <function_calls><invoke name="..."><parameter name="...">...</invoke> (Anthropic format)."""
+        calls = []
+        known_tools = {"write", "read", "edit", "line_edit", "grep", "glob",
+                       "shell", "web_fetch", "web_search", "browse", "open_app", "mano_cua",
+                       "sysinfo", "music", "memory_add", "browser"}
+
+        invoke_pattern = re.compile(
+            r"<invoke\s+name=\"(\w+)\">(.*?)</invoke>", re.DOTALL | re.IGNORECASE
+        )
+        param_pattern = re.compile(
+            r"<parameter\s+name=\"(\w+)\">(.*?)</parameter>", re.DOTALL | re.IGNORECASE
+        )
+
+        for m in invoke_pattern.finditer(response):
+            tool_name = m.group(1)
+            if tool_name not in known_tools:
+                continue
+            params_str = m.group(2)
+            args = {}
+            for pm in param_pattern.finditer(params_str):
+                pname = pm.group(1)
+                pval = pm.group(2).strip()
+                args[pname] = pval
+            if args:
+                calls.append((tool_name, args))
         return calls
 
     def _parse_xml_tool_format(self, response: str) -> list[tuple[str, dict]]:
         """Parse <tool>name ... JSON ... format (some models default to this)."""
         calls = []
         known_tools = {"write", "read", "edit", "line_edit", "grep", "glob",
-                       "shell", "web_fetch", "browse", "mano_cua", "sysinfo", "music"}
+                       "shell", "web_fetch", "web_search", "browse", "mano_cua",
+                       "sysinfo", "music", "memory_add", "browser"}
 
-        # Find <tool>NAME positions
-        tool_pattern = re.compile(r"<tool>\s*(\w+)\s*>?\s*$", re.IGNORECASE | re.MULTILINE)
+        # Find <tool>NAME — also capture same-line JSON if present
+        tool_pattern = re.compile(r"<tool>\s*(\w+)\s*>?", re.IGNORECASE)
         matches = list(tool_pattern.finditer(response))
 
         for i, m in enumerate(matches):
@@ -216,6 +279,20 @@ class Orchestrator:
             if tool_name not in known_tools:
                 continue
             body_start = m.end()
+
+            # Check for same-line JSON (e.g. <tool>shell {"command": "ls"})
+            same_line_end = response.find("\n", body_start)
+            if same_line_end == -1:
+                same_line_end = len(response)
+            same_line = response[body_start:same_line_end].strip()
+            if same_line.startswith("{"):
+                try:
+                    args = json.loads(same_line)
+                    calls.append((tool_name, args))
+                    continue
+                except json.JSONDecodeError:
+                    pass
+
             body_end = len(response)
             close_m = re.search(r"</tool>", response[body_start:])
             if close_m:
@@ -234,7 +311,7 @@ class Orchestrator:
             except json.JSONDecodeError:
                 pass
 
-            json_match = re.search(r"\{.*\}", body, re.DOTALL)
+            json_match = re.search(r"\{.*?\}", body, re.DOTALL)
             if json_match:
                 try:
                     args = json.loads(json_match.group())
@@ -285,13 +362,13 @@ class Orchestrator:
 
     def _store_conversation(self, user_message: str, full_response: str,
                             all_tool_results: list[ToolResult]):
-        """Store user+assistant messages, preserving TOOL: lines in history."""
-        stored = full_response
+        """Store user+assistant messages. Strips TOOL: lines to keep history clean."""
+        clean = self._strip_tool_lines(full_response)
         if all_tool_results:
-            brief = " | ".join(f"{r.tool}: {r.output[:200]}" for r in all_tool_results)
-            stored += f"\n[results: {brief}]"
+            brief = " | ".join(f"{r.tool}: {r.output[:120]}" for r in all_tool_results[-5:])
+            clean += f"\n[tools used: {brief}]"
         self.messages.append({"role": "user", "content": user_message})
-        self.messages.append({"role": "assistant", "content": stored})
+        self.messages.append({"role": "assistant", "content": clean})
 
     def chat(self, user_message: str) -> str:
         self._assemble_context(user_message)
@@ -301,11 +378,19 @@ class Orchestrator:
         all_tool_results: list[ToolResult] = []
 
         for turn in range(MAX_TOOL_TURNS):
-            response = chat(messages=msgs, model=self.model, stream=False)
+            try:
+                response = chat(messages=msgs, model=self.model, stream=False)
+            except Exception as e:
+                all_tool_results.append(ToolResult("error", str(e), -1, 0))
+                break
 
             tool_calls = self._parse_tool_calls(response)
             if not tool_calls:
                 full_response += response
+                if self._should_continue(response, "stop"):
+                    msgs.append({"role": "assistant", "content": response})
+                    msgs.append({"role": "user", "content": "[continue]"})
+                    continue
                 break
 
             full_response += response
@@ -314,6 +399,9 @@ class Orchestrator:
 
             msgs.append({"role": "assistant", "content": response})
             msgs.append({"role": "user", "content": self._format_tool_result_text(results)})
+
+            # Always add continue prompt after tool results for non-streaming
+            msgs.append({"role": "user", "content": "[continue]"})
 
         self._store_conversation(user_message, full_response, all_tool_results)
         return self._strip_tool_lines(full_response)
@@ -327,19 +415,57 @@ class Orchestrator:
 
         full_response = ""
         all_tool_results: list[ToolResult] = []
+        consecutive_same_tool = 0
+        last_tool_key: tuple[str, str] | None = None  # (tool_name, json_args)
 
         for turn in range(MAX_TOOL_TURNS):
-            response = chat(messages=msgs, model=self.model, stream=True)
+            try:
+                response = chat(messages=msgs, model=self.model, stream=True)
+            except Exception as e:
+                yield StreamEvent.chunk(f"\n[stream error: {e}]")
+                break
 
             buffer = ""
+            reasoning = ""
+            finish_reason = "unknown"
             for chunk in response:
-                buffer += chunk
-                yield StreamEvent.chunk(chunk)
+                if isinstance(chunk, dict):
+                    if "_reasoning" in chunk:
+                        reasoning += chunk["_reasoning"]
+                        yield StreamEvent.thinking(chunk["_reasoning"])
+                    else:
+                        finish_reason = chunk.get("_finish_reason", "unknown")
+                else:
+                    buffer += chunk
+                    yield StreamEvent.chunk(chunk)
 
             tool_calls = self._parse_tool_calls(buffer)
             if not tool_calls:
                 full_response += buffer
+                if self._should_continue(buffer, finish_reason):
+                    msgs.append({"role": "assistant", "content": buffer})
+                    msgs.append({"role": "user", "content": "[continue]"})
+                    continue
                 break
+
+            # Detect tool loops: same tool with same args called repeatedly
+            for name, args in tool_calls:
+                args_key = (name, json.dumps(args, sort_keys=True))
+                if args_key == last_tool_key:
+                    consecutive_same_tool += 1
+                else:
+                    consecutive_same_tool = 0
+                    last_tool_key = args_key
+
+                if consecutive_same_tool >= MAX_CONSECUTIVE_SAME_TOOL:
+                    yield StreamEvent.chunk("\n[stopped: same tool called repeatedly]")
+                    all_tool_results.append(
+                        ToolResult("loop_break", json.dumps(args), "Repeated tool call detected", 0, 0))
+                    # Force exit the outer loop
+                    full_response += buffer
+                    self._store_conversation(user_message, full_response, all_tool_results)
+                    yield StreamEvent.done()
+                    return
 
             full_response += buffer
             for name, args in tool_calls:
@@ -354,8 +480,17 @@ class Orchestrator:
             msgs.append({"role": "assistant", "content": buffer})
             msgs.append({"role": "user", "content": self._format_tool_result_text(results)})
 
+            # If API truncated during tool call, request continuation
+            if finish_reason == "length":
+                msgs.append({"role": "user", "content": "[continue]"})
+
         self._store_conversation(user_message, full_response, all_tool_results)
         yield StreamEvent.done()
+
+    @staticmethod
+    def _should_continue(buffer: str, finish_reason: str) -> bool:
+        """Continue only when the API explicitly truncated output."""
+        return finish_reason == "length"
 
     @staticmethod
     def _strip_tool_lines(text: str) -> str:
