@@ -267,7 +267,7 @@ def _handle_slash(cmd: str, orch: Orchestrator, current_model: str):
     /help            This help
     /exit            Quit
 
-  [{AMBER}]X-Agent[/{AMBER}] [{DIM}]— AI Agent Framework · 16 tools[/{DIM}]
+  [{AMBER}]X-Agent[/{AMBER}] [{DIM}]— AI Agent Framework · {len(tool_registry._tools)} tools[/{DIM}]
 
   [{AMBER}]Tips[/{AMBER}]
     End a line with \\\\ for multiline input

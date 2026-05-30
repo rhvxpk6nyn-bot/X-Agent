@@ -11,10 +11,13 @@ from core.memory import store as memory_store, Memory
 from core.model_router import chat, Message
 from core.skills import skills as skill_registry, Skill
 from core.tools import tools as tool_registry, ToolResult
+from core.platform import get_toolkit
 
 MAX_TOOL_TURNS = 10
 MAX_CONSECUTIVE_SAME_TOOL = 3
 TOOL_RESULT_MAX_CHARS = 16000
+
+_platform_toolkit = get_toolkit()
 
 
 @dataclass
@@ -45,7 +48,10 @@ class StreamEvent:
     def done(cls, tokens: dict | None = None) -> "StreamEvent":
         return cls(kind="done", data=tokens or {})
 
-SYSTEM_PROMPT = """You are X-Agent, an AI agent running on macOS. Execute tasks directly — never describe, just do it.
+def _build_system_prompt() -> str:
+    """Build the system prompt dynamically based on platform."""
+    platform_name = _platform_toolkit.platform_name
+    return f"""You are X-Agent, an AI agent running on {platform_name}. Execute tasks directly — never describe, just do it.
 
 ## Thinking method
 1. What does the user want? → one brief assessment
@@ -56,7 +62,7 @@ Never: re-analyze a solved problem, repeat conclusions, or think in circles.
 
 ## Tool call format — CRITICAL
 Output EXACTLY this pattern on its own line:
-TOOL: tool_name {"key": "value"}
+TOOL: tool_name {{"key": "value"}}
 
 Rules:
 - One TOOL: per line. JSON uses double quotes. No trailing commas.
@@ -64,20 +70,20 @@ Rules:
 - No extra text on the same line as TOOL:.
 
 WRONG (never do this):
-<tool>shell {"command": "ls"}</tool>
+<tool>shell {{"command": "ls"}}</tool>
 <function_calls><invoke name="shell"><parameter name="command">ls</parameter></invoke></function_calls>
 
 RIGHT:
-TOOL: shell {"command": "ls"}
-TOOL: open_app {"app": "Apple Music"}
-TOOL: read {"path": "~/agent/core/tools.py", "offset": 1, "limit": 50}
-TOOL: browser {"action": "navigate", "url": "https://example.com"}
-TOOL: memory_add {"mtype": "preference", "title": "Prefers dark mode", "content": "User always uses dark theme", "importance": 0.6}
+TOOL: shell {{"command": "ls"}}
+TOOL: open_app {{"app": "Music"}}
+TOOL: read {{"path": "~/agent/core/tools.py", "offset": 1, "limit": 50}}
+TOOL: browser {{"action": "navigate", "url": "https://example.com"}}
+TOOL: memory_add {{"mtype": "preference", "title": "Prefers dark mode", "content": "User always uses dark theme", "importance": 0.6}}
 
-## Tool priority (macOS)
-- open_app FIRST for launching macOS apps by name (`Music`, `Apple Music`, `微信`, `PyCharm`)
-- shell: run CLI commands and control macOS with `osascript`
-- browser: for real web interaction (navigate, click, type, extract content, run JS in Chrome)
+## Tool priority
+- open_app FIRST for launching apps by name
+- shell: run CLI commands ({"AppleScript via osascript" if platform_name == "macOS" else "PowerShell or CMD"})
+- browser: {"for real Chrome interaction (navigate, click, type, extract content, run JS)" if platform_name == "macOS" else "navigate and screenshot only; use web_fetch/web_search for read-only web content"}
 - web_fetch / web_search: read-only web — fetch a URL or search without opening a browser
 - mano_cua: LAST RESORT only for complex visual GUI with no CLI/browser equivalent
 - Prefer: open_app for launching apps; otherwise shell > browser > web_fetch > mano_cua
@@ -96,25 +102,9 @@ After ANY task that reveals something worth remembering, call memory_add WITHOUT
 - Feedback (corrections, confirmations) → type=feedback
 - Non-obvious facts → type=fact
 
-## Available tools (16 total)
-| Tool | Key args | Purpose |
-|------|----------|---------|
-| shell | command, cwd, timeout | Run terminal commands, AppleScript, CLI |
-| read | path, offset, limit | Read file with line numbers |
-| write | path, content | Create/overwrite file |
-| edit | path, old, new | Find-and-replace first occurrence |
-| line_edit | path, start, end, content | Replace line range |
-| grep | pattern, path, glob_pattern | Search files |
-| glob | pattern, path | Find files |
-| web_fetch | url | HTTP GET → text (10k chars) |
-| web_search | query, max_results | Bing search → titles+snippets+URLs |
-| browse | url | Open URL in default browser (fire-and-forget) |
-| open_app | app, wait | Open a macOS app by common name or bundle id |
-| browser | action, url/selector/text/js | Control Chrome: navigate/content/click/type/run_js/screenshot |
-| mano_cua | task, app, url | VLA GUI automation (last resort) |
-| sysinfo | (none) | OS, hardware, apps, network |
-| music | action, song, artist | Control Apple Music |
-| memory_add | mtype, title, content, tags, importance | Save memory for future sessions |"""
+{_platform_toolkit.get_system_prompt_appendix()}"""
+
+SYSTEM_PROMPT = _build_system_prompt()
 
 TOOL_LINE_RE = re.compile(r"^TOOL:\s*")
 
@@ -238,9 +228,7 @@ class Orchestrator:
     def _parse_function_calls_format(self, response: str) -> list[tuple[str, dict]]:
         """Parse <function_calls><invoke name="..."><parameter name="...">...</invoke> (Anthropic format)."""
         calls = []
-        known_tools = {"write", "read", "edit", "line_edit", "grep", "glob",
-                       "shell", "web_fetch", "web_search", "browse", "open_app", "mano_cua",
-                       "sysinfo", "music", "memory_add", "browser"}
+        known_tools = set(tool_registry._tools.keys())
 
         invoke_pattern = re.compile(
             r"<invoke\s+name=\"(\w+)\">(.*?)</invoke>", re.DOTALL | re.IGNORECASE
@@ -266,9 +254,7 @@ class Orchestrator:
     def _parse_xml_tool_format(self, response: str) -> list[tuple[str, dict]]:
         """Parse <tool>name ... JSON ... format (some models default to this)."""
         calls = []
-        known_tools = {"write", "read", "edit", "line_edit", "grep", "glob",
-                       "shell", "web_fetch", "web_search", "browse", "mano_cua",
-                       "sysinfo", "music", "memory_add", "browser"}
+        known_tools = set(tool_registry._tools.keys())
 
         # Find <tool>NAME — also capture same-line JSON if present
         tool_pattern = re.compile(r"<tool>\s*(\w+)\s*>?", re.IGNORECASE)

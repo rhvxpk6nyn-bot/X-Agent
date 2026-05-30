@@ -20,6 +20,7 @@ from core.memory import COLD_DIR, HOT_DIR, WARM_DIR, Memory, store as memory_sto
 from core.orchestrator import Orchestrator
 from core.skills import skills as skill_registry
 from core.tools import tools as tool_registry
+from core.platform import PLATFORM as _platform_name
 
 app = FastAPI(title="X-Agent Web")
 
@@ -156,6 +157,7 @@ async def api_config():
         "default_model": config.default_model,
         "models": list(config.models.keys()),
         "tools": list(tool_registry._tools.keys()),
+        "platform": _platform_name,
     }
 
 
