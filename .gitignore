@@ -34,3 +34,6 @@ credentials*
 # Agent runtime
 skills/installed/
 .agent/
+.playwright-cli/
+logs/
+memory/
