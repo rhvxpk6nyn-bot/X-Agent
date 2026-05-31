@@ -198,7 +198,7 @@ class WinToolkit(BasePlatformToolkit):
         return _WIN_PROMPT_APPENDIX
 
 
-_WIN_PROMPT_APPENDIX = """## Available tools (16 total)
+_WIN_PROMPT_APPENDIX = """## Available tools (17 total)
 | Tool | Key args | Purpose |
 |------|----------|---------|
 | shell | command, cwd, timeout | Run PowerShell, CMD, or CLI commands |
@@ -216,4 +216,5 @@ _WIN_PROMPT_APPENDIX = """## Available tools (16 total)
 | mano_cua | task, app, url | VLA GUI automation (if CLI installed) |
 | sysinfo | (none) | OS, hardware, apps, network |
 | music | action, song, artist | Not available on Windows |
+| volume | action, level, step | Not available on Windows yet |
 | memory_add | mtype, title, content, tags, importance | Save memory for future sessions |"""

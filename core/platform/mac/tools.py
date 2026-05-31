@@ -168,6 +168,67 @@ class MacToolkit(BasePlatformToolkit):
         except subprocess.TimeoutExpired:
             return "[error] Music command timed out"
 
+    # ── volume (system output volume via AppleScript) ─
+
+    def volume(self, action: str = "get", level: int | None = None, step: int = 10) -> str:
+        """Control macOS output volume. Actions: get, set, up, down, mute, unmute."""
+        action = (action or "get").lower().strip()
+
+        def _osascript(script: str) -> tuple[int, str, str]:
+            result = subprocess.run(
+                ["osascript", "-e", script],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            return result.returncode, result.stdout.strip(), result.stderr.strip()
+
+        def _current() -> tuple[int | None, bool | None, str | None]:
+            code, out, err = _osascript("output volume of (get volume settings) & \",\" & output muted of (get volume settings)")
+            if code != 0:
+                return None, None, err or "could not read volume"
+            try:
+                vol_s, muted_s = out.split(",", 1)
+                return int(vol_s), muted_s.strip().lower() == "true", None
+            except ValueError:
+                return None, None, f"unexpected volume output: {out}"
+
+        current, muted, read_error = _current()
+        if read_error:
+            return f"[error] {read_error}"
+
+        if action == "get":
+            return f"Volume: {current}% muted={str(muted).lower()}"
+
+        if action == "set":
+            if level is None:
+                return "[error] level required for action=set"
+            target = max(0, min(100, int(level)))
+            script = f"set volume output volume {target}\nset volume without output muted"
+        elif action == "up":
+            target = max(0, min(100, int(current or 0) + max(1, int(step))))
+            script = f"set volume output volume {target}\nset volume without output muted"
+        elif action == "down":
+            target = max(0, min(100, int(current or 0) - max(1, int(step))))
+            script = f"set volume output volume {target}"
+        elif action == "mute":
+            target = current
+            script = "set volume with output muted"
+        elif action == "unmute":
+            target = current
+            script = "set volume without output muted"
+        else:
+            return "[error] Unknown action. Use: get, set, up, down, mute, unmute"
+
+        code, _out, err = _osascript(script)
+        if code != 0:
+            return f"[error] {err or 'volume command failed'}"
+
+        new_volume, new_muted, read_error = _current()
+        if read_error:
+            return f"Volume command sent. Could not verify: {read_error}"
+        return f"Volume: {new_volume}% muted={str(new_muted).lower()} (was {current}%)"
+
     # ── browser (Chrome via AppleScript + JS) ─────────
 
     def browser(self, action: str, url: str = "", selector: str = "",
@@ -309,7 +370,7 @@ class MacToolkit(BasePlatformToolkit):
         return _MAC_PROMPT_APPENDIX
 
 
-_MAC_PROMPT_APPENDIX = """## Available tools (16 total)
+_MAC_PROMPT_APPENDIX = """## Available tools (17 total)
 | Tool | Key args | Purpose |
 |------|----------|---------|
 | shell | command, cwd, timeout | Run terminal commands, AppleScript, CLI |
@@ -327,4 +388,5 @@ _MAC_PROMPT_APPENDIX = """## Available tools (16 total)
 | mano_cua | task, app, url | VLA GUI automation (last resort) |
 | sysinfo | (none) | OS, hardware, apps, network |
 | music | action, song, artist | Control Apple Music |
+| volume | action, level, step | Control system output volume: get/set/up/down/mute/unmute |
 | memory_add | mtype, title, content, tags, importance | Save memory for future sessions |"""

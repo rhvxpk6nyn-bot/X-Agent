@@ -82,6 +82,7 @@ TOOL: memory_add {{"mtype": "preference", "title": "Prefers dark mode", "content
 
 ## Tool priority
 - open_app FIRST for launching apps by name
+- volume FIRST for system volume requests (turn up/down, mute/unmute, set volume)
 - shell: run CLI commands ({"AppleScript via osascript" if platform_name == "macOS" else "PowerShell or CMD"})
 - browser: {"for real Chrome interaction (navigate, click, type, extract content, run JS)" if platform_name == "macOS" else "navigate and screenshot only; use web_fetch/web_search for read-only web content"}
 - web_fetch / web_search: read-only web — fetch a URL or search without opening a browser

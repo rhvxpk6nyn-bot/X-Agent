@@ -43,6 +43,10 @@ class BasePlatformToolkit(ABC):
         """Control music playback. Returns error if unavailable on this platform."""
         return "[error] Music control not available on this platform"
 
+    def volume(self, action: str = "get", level: int | None = None, step: int = 10) -> str:
+        """Control system output volume. Returns error if unavailable."""
+        return "[error] Volume control not available on this platform"
+
     @abstractmethod
     def get_system_prompt_appendix(self) -> str:
         """Return platform-specific sections for the system prompt.

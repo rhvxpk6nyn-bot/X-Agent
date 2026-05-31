@@ -319,6 +319,11 @@ def music(action: str = "play", song: str = "", artist: str = "",
     return _platform.music(action, song, artist, album, playlist)
 
 
+def volume(action: str = "get", level: int | None = None, step: int = 10) -> str:
+    """Control system output volume with the current platform toolkit."""
+    return _platform.volume(action, level, step)
+
+
 def sysinfo() -> str:
     """Gather essential system info (platform-specific)."""
     return _platform.sysinfo()
@@ -367,5 +372,6 @@ tools.register("open_app", open_app)
 tools.register("mano_cua", mano_cua)
 tools.register("sysinfo", sysinfo)
 tools.register("music", music)
+tools.register("volume", volume)
 tools.register("memory_add", memory_add)
 tools.register("browser", browser)
