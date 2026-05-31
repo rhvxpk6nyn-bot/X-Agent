@@ -16,6 +16,7 @@ from core.platform import get_toolkit
 MAX_TOOL_TURNS = 10
 MAX_CONSECUTIVE_SAME_TOOL = 3
 TOOL_RESULT_MAX_CHARS = 16000
+ACTION_RETRY_MAX = 1
 
 _platform_toolkit = get_toolkit()
 
@@ -196,6 +197,7 @@ class Orchestrator:
         lower = text.lower()
         feedback_markers = (
             "错", "错误", "不对", "不是", "没用", "没有用", "没生效", "没有生效",
+            "没执行", "没有执行", "没回答完", "没有回答完",
             "打不开", "不能", "无法", "失败", "假", "摆设", "别再", "下次不要",
             "下次别", "又", "还是", "bug", "wrong", "doesn't work", "did not work",
             "failed", "not working", "don't do that again",
@@ -405,10 +407,45 @@ class Orchestrator:
             for r in results
         )
 
+    @staticmethod
+    def _looks_like_action_request(user_message: str) -> bool:
+        text = user_message.lower()
+        markers = (
+            "打开", "启动", "运行", "执行", "创建", "新建", "写", "修改", "编辑",
+            "删除", "上传", "下载", "搜索", "查找", "调大", "调小", "调整",
+            "设置", "静音", "取消静音", "播放", "暂停", "修复", "重启",
+            "open", "start", "run", "execute", "create", "write", "edit",
+            "delete", "upload", "download", "search", "set", "turn up",
+            "turn down", "mute", "unmute", "play", "pause", "fix", "restart",
+        )
+        return any(marker in text for marker in markers)
+
+    @staticmethod
+    def _action_retry_prompt(user_message: str) -> str:
+        return (
+            "The user asked for a real action, but your last answer did not call a tool. "
+            "Do not explain or analyze. Execute now with exactly one TOOL line. "
+            f"Original user request: {user_message}"
+        )
+
+    @staticmethod
+    def _result_summary(results: list[ToolResult]) -> str:
+        if not results:
+            return ""
+        last = results[-1]
+        output = (last.output or last.error or "").strip()
+        if last.exit_code != 0:
+            return f"执行失败：{output or last.error or last.tool}"
+        if output:
+            return f"已执行：{output}"
+        return f"已执行 {last.tool}。"
+
     def _store_conversation(self, user_message: str, full_response: str,
                             all_tool_results: list[ToolResult]):
         """Store user+assistant messages. Strips TOOL: lines to keep history clean."""
         clean = self._strip_tool_lines(full_response)
+        if all_tool_results and not clean:
+            clean = self._result_summary(all_tool_results)
         self.messages.append({"role": "user", "content": user_message})
         self.messages.append({"role": "assistant", "content": clean})
 
@@ -418,6 +455,8 @@ class Orchestrator:
 
         full_response = ""
         all_tool_results: list[ToolResult] = []
+        action_retries = 0
+        awaiting_final_after_tool = False
 
         for turn in range(MAX_TOOL_TURNS):
             try:
@@ -429,6 +468,14 @@ class Orchestrator:
             tool_calls = self._parse_tool_calls(response)
             if not tool_calls:
                 full_response += response
+                if all_tool_results:
+                    awaiting_final_after_tool = False
+                if (not all_tool_results and action_retries < ACTION_RETRY_MAX
+                        and self._looks_like_action_request(user_message)):
+                    action_retries += 1
+                    msgs.append({"role": "assistant", "content": response})
+                    msgs.append({"role": "user", "content": self._action_retry_prompt(user_message)})
+                    continue
                 if self._should_continue(response, "stop"):
                     msgs.append({"role": "assistant", "content": response})
                     msgs.append({"role": "user", "content": "[continue]"})
@@ -438,6 +485,7 @@ class Orchestrator:
             full_response += response
             results = self._execute_tools(tool_calls)
             all_tool_results.extend(results)
+            awaiting_final_after_tool = True
 
             msgs.append({"role": "assistant", "content": response})
             msgs.append({"role": "user", "content": self._format_tool_result_text(results)})
@@ -445,8 +493,14 @@ class Orchestrator:
             # Always add continue prompt after tool results for non-streaming
             msgs.append({"role": "user", "content": "[continue]"})
 
+        if awaiting_final_after_tool:
+            summary = self._result_summary(all_tool_results)
+            if summary:
+                full_response += "\n" + summary
+
         self._store_conversation(user_message, full_response, all_tool_results)
-        return self._strip_tool_lines(full_response)
+        clean = self._strip_tool_lines(full_response)
+        return clean or self._result_summary(all_tool_results)
 
     def chat_stream(self, user_message: str) -> Iterator[StreamEvent]:
         """Stream chat with multi-turn tool execution.
@@ -459,6 +513,8 @@ class Orchestrator:
         all_tool_results: list[ToolResult] = []
         consecutive_same_tool = 0
         last_tool_key: tuple[str, str] | None = None  # (tool_name, json_args)
+        action_retries = 0
+        awaiting_final_after_tool = False
 
         for turn in range(MAX_TOOL_TURNS):
             try:
@@ -484,6 +540,14 @@ class Orchestrator:
             tool_calls = self._parse_tool_calls(buffer)
             if not tool_calls:
                 full_response += buffer
+                if all_tool_results:
+                    awaiting_final_after_tool = False
+                if (not all_tool_results and action_retries < ACTION_RETRY_MAX
+                        and self._looks_like_action_request(user_message)):
+                    action_retries += 1
+                    msgs.append({"role": "assistant", "content": buffer})
+                    msgs.append({"role": "user", "content": self._action_retry_prompt(user_message)})
+                    continue
                 if self._should_continue(buffer, finish_reason):
                     msgs.append({"role": "assistant", "content": buffer})
                     msgs.append({"role": "user", "content": "[continue]"})
@@ -515,6 +579,7 @@ class Orchestrator:
 
             results = self._execute_tools(tool_calls)
             all_tool_results.extend(results)
+            awaiting_final_after_tool = True
 
             for r in results:
                 yield StreamEvent.tool_result(r.tool, r.output, r.exit_code, r.duration_ms)
@@ -524,6 +589,13 @@ class Orchestrator:
 
             # Ask for the user-facing final answer after tool execution.
             msgs.append({"role": "user", "content": "[continue]"})
+
+        clean = self._strip_tool_lines(full_response)
+        if all_tool_results and (awaiting_final_after_tool or not clean):
+            summary = self._result_summary(all_tool_results)
+            if summary:
+                yield StreamEvent.chunk(summary)
+                full_response += "\n" + summary
 
         self._store_conversation(user_message, full_response, all_tool_results)
         yield StreamEvent.done()
