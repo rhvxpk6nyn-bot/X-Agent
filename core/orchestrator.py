@@ -103,6 +103,12 @@ After ANY task that reveals something worth remembering, call memory_add WITHOUT
 - Feedback (corrections, confirmations) → type=feedback
 - Non-obvious facts → type=fact
 
+## Self-improvement
+- Treat [Memory: feedback] and correction memories as high-priority operating rules.
+- When the user says something failed, was wrong, or did not actually happen, learn from it and avoid the same behavior.
+- Never claim a computer action succeeded unless a tool result confirms it.
+- If a previous approach was corrected, choose a different verified approach next time.
+
 {_platform_toolkit.get_system_prompt_appendix()}"""
 
 SYSTEM_PROMPT = _build_system_prompt()
@@ -181,7 +187,58 @@ class Orchestrator:
         self.context = AgentContext()
         self.last_tool_results.clear()
 
+    def _maybe_store_error_feedback(self, user_message: str):
+        """Persist explicit user corrections so future turns avoid repeated mistakes."""
+        text = user_message.strip()
+        if not text:
+            return
+
+        lower = text.lower()
+        feedback_markers = (
+            "错", "错误", "不对", "不是", "没用", "没有用", "没生效", "没有生效",
+            "打不开", "不能", "无法", "失败", "假", "摆设", "别再", "下次不要",
+            "下次别", "又", "还是", "bug", "wrong", "doesn't work", "did not work",
+            "failed", "not working", "don't do that again",
+        )
+        if not any(marker in lower for marker in feedback_markers):
+            return
+
+        previous_user = ""
+        previous_assistant = ""
+        for msg in reversed(self.messages):
+            if not previous_assistant and msg.get("role") == "assistant":
+                previous_assistant = str(msg.get("content", ""))
+            elif not previous_user and msg.get("role") == "user":
+                previous_user = str(msg.get("content", ""))
+            if previous_user and previous_assistant:
+                break
+
+        tool_summary = " | ".join(
+            f"{r.tool} exit={r.exit_code}: {(r.output or r.error)[:200]}"
+            for r in self.last_tool_results[-5:]
+        )
+        content = (
+            f"User reported a previous X-Agent mistake.\n"
+            f"Previous user request: {previous_user[:500] or '(unknown)'}\n"
+            f"Previous assistant response: {self._strip_tool_lines(previous_assistant)[:500] or '(unknown)'}\n"
+            f"Recent tool results: {tool_summary or '(none)'}\n"
+            f"Correction from user: {text[:800]}\n"
+            "Future rule: before claiming success, verify with a real tool result when the task affects the computer; "
+            "do not expose internal tool/result markers in user-facing text; if a tool is missing or limited, say so plainly."
+        )
+        try:
+            memory_store.add(Memory(
+                mtype="feedback",
+                title=f"Avoid repeating corrected mistake: {text[:60]}",
+                content=content,
+                tags=["self-improvement", "correction", "avoid-repeat"],
+                importance=0.95,
+            ), "hot")
+        except Exception:
+            pass
+
     def _assemble_context(self, user_message: str):
+        self._maybe_store_error_feedback(user_message)
         self.context.hot_memories = memory_store.get_hot()
         self.context.relevant_memories = memory_store.search(user_message)
         self.context.active_skill = skill_registry.match(user_message)
