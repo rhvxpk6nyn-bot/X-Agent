@@ -522,7 +522,7 @@
           <div class="bubble"></div>
         </div>`;
       feed.appendChild(node);
-      state.currentAssistant = { node, bubble: node.querySelector(".bubble"), text: "" };
+      state.currentAssistant = { node, bubble: node.querySelector(".bubble"), text: "", rawText: "" };
       state.messages.push({ role: "assistant", content: "" });
       updateStats();
       scrollBottom();
@@ -549,9 +549,10 @@
     function appendAssistant(text) {
       clearThinking();
       if (!state.currentAssistant) addAssistantMessage();
-      const cleaned = cleanAssistantText(text);
+      state.currentAssistant.rawText += text;
+      const cleaned = cleanAssistantText(state.currentAssistant.rawText);
       if (!cleaned) return;
-      state.currentAssistant.text += cleaned;
+      state.currentAssistant.text = cleaned;
       state.currentAssistant.bubble.textContent = state.currentAssistant.text.trimStart();
       const last = state.messages[state.messages.length - 1];
       if (last && last.role === "assistant") last.content = state.currentAssistant.text;
@@ -566,6 +567,7 @@
         if (/^TOOL:\s*\w+\s*\{/.test(trimmed)) continue;
         if (/^<\/?tool/i.test(trimmed)) continue;
         if (/^<function_calls/i.test(trimmed) || /^<\/function_calls/i.test(trimmed)) continue;
+        if (/^\[tools used:/i.test(trimmed)) continue;
         kept.push(line);
       }
       return kept.join("\n");

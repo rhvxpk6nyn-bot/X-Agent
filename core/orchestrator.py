@@ -113,6 +113,7 @@ TOOL_LINE_RE = re.compile(r"^TOOL:\s*")
 _TOOL_XML_BLOCK_RE = re.compile(r"<tool>.*?</tool>", re.IGNORECASE | re.DOTALL)
 _TOOL_XML_TAG_RE = re.compile(r"</?tool>\s*\w*\s*>?\s*", re.IGNORECASE)
 _TOOL_INLINE_RE = re.compile(r'TOOL:\s*\w+\s*\{[^\n]*\}\s*', re.IGNORECASE)
+_TOOLS_USED_RE = re.compile(r"^\[tools used:.*?\]\s*$", re.IGNORECASE | re.MULTILINE)
 
 # ── Cached system info (lazy, runs once) ───────────────
 
@@ -351,9 +352,6 @@ class Orchestrator:
                             all_tool_results: list[ToolResult]):
         """Store user+assistant messages. Strips TOOL: lines to keep history clean."""
         clean = self._strip_tool_lines(full_response)
-        if all_tool_results:
-            brief = " | ".join(f"{r.tool}: {r.output[:120]}" for r in all_tool_results[-5:])
-            clean += f"\n[tools used: {brief}]"
         self.messages.append({"role": "user", "content": user_message})
         self.messages.append({"role": "assistant", "content": clean})
 
@@ -467,9 +465,8 @@ class Orchestrator:
             msgs.append({"role": "assistant", "content": buffer})
             msgs.append({"role": "user", "content": self._format_tool_result_text(results)})
 
-            # If API truncated during tool call, request continuation
-            if finish_reason == "length":
-                msgs.append({"role": "user", "content": "[continue]"})
+            # Ask for the user-facing final answer after tool execution.
+            msgs.append({"role": "user", "content": "[continue]"})
 
         self._store_conversation(user_message, full_response, all_tool_results)
         yield StreamEvent.done()
@@ -485,6 +482,7 @@ class Orchestrator:
         text = _TOOL_XML_BLOCK_RE.sub("", text)
         text = _TOOL_XML_TAG_RE.sub("", text)
         text = _TOOL_INLINE_RE.sub("", text)
+        text = _TOOLS_USED_RE.sub("", text)
         return text.strip()
 
     def stats(self) -> dict:
